@@ -1,3 +1,8 @@
+# ble_scan_connect.py
+
+from bluepy.btle import Peripheral, UUID
+from bluepy.btle import Scanner, DefaultDelegate
+from bluepy import btle
 
 class ScanDelegate(DefaultDelegate):
     def __init__(self):
