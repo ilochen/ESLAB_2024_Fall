@@ -1,8 +1,8 @@
 /**
   ******************************************************************************
-  * @file    App/gatt_db.c
+  * @file    App/sensor.c
   * @author  SRA Application Team
-  * @brief   Functions to build GATT DB and handle GATT events
+  * @brief   Sensor init and sensor state machines
   ******************************************************************************
   * @attention
   *
@@ -16,359 +16,205 @@
   ******************************************************************************
   */
 
+/* Includes ------------------------------------------------------------------*/
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "bluenrg_def.h"
+#include "sensor.h"
 #include "gatt_db.h"
-#include "bluenrg_conf.h"
+#include "bluenrg_gap.h"
+#include "bluenrg_gap_aci.h"
+#include "hci_le.h"
+#include "hci_const.h"
+#include "bluenrg_aci_const.h"
 #include "bluenrg_gatt_aci.h"
 
-/** @brief Macro that stores Value into a buffer in Little Endian Format (2 bytes)*/
-#define HOST_TO_LE_16(buf, val)    ( ((buf)[0] =  (uint8_t) (val)    ) , \
-                                   ((buf)[1] =  (uint8_t) (val>>8) ) )
+/* Private typedef -----------------------------------------------------------*/
+/* Private define ------------------------------------------------------------*/
+#define  ADV_INTERVAL_MIN_MS  1000
+#define  ADV_INTERVAL_MAX_MS  1200
 
-/** @brief Macro that stores Value into a buffer in Little Endian Format (4 bytes) */
-#define HOST_TO_LE_32(buf, val)    ( ((buf)[0] =  (uint8_t) (val)     ) , \
-                                   ((buf)[1] =  (uint8_t) (val>>8)  ) , \
-                                   ((buf)[2] =  (uint8_t) (val>>16) ) , \
-                                   ((buf)[3] =  (uint8_t) (val>>24) ) )
+/* Private macro -------------------------------------------------------------*/
+/* Private variables ---------------------------------------------------------*/
+extern uint8_t bdaddr[BDADDR_SIZE];
+extern uint8_t bnrg_expansion_board;
+__IO uint8_t set_connectable = 1;
+__IO uint16_t connection_handle = 0;
+__IO uint8_t  notification_enabled = FALSE;
+__IO uint32_t connected = FALSE;
 
-#define COPY_UUID_128(uuid_struct, uuid_15, uuid_14, uuid_13, uuid_12, uuid_11, uuid_10, uuid_9, uuid_8, uuid_7, uuid_6, uuid_5, uuid_4, uuid_3, uuid_2, uuid_1, uuid_0) \
-do {\
-    uuid_struct[0] = uuid_0; uuid_struct[1] = uuid_1; uuid_struct[2] = uuid_2; uuid_struct[3] = uuid_3; \
-        uuid_struct[4] = uuid_4; uuid_struct[5] = uuid_5; uuid_struct[6] = uuid_6; uuid_struct[7] = uuid_7; \
-            uuid_struct[8] = uuid_8; uuid_struct[9] = uuid_9; uuid_struct[10] = uuid_10; uuid_struct[11] = uuid_11; \
-                uuid_struct[12] = uuid_12; uuid_struct[13] = uuid_13; uuid_struct[14] = uuid_14; uuid_struct[15] = uuid_15; \
-}while(0)
+extern uint16_t EnvironmentalCharHandle;
+extern uint16_t AccGyroMagCharHandle;
 
-/* Hardware Characteristics Service */
-#define COPY_HW_SENS_W2ST_SERVICE_UUID(uuid_struct)    COPY_UUID_128(uuid_struct,0x00,0x00,0x00,0x00,0x00,0x01,0x11,0xe1,0x9a,0xb4,0x00,0x02,0xa5,0xd5,0xc5,0x1b)
-#define COPY_ENVIRONMENTAL_W2ST_CHAR_UUID(uuid_struct) COPY_UUID_128(uuid_struct,0x00,0x00,0x00,0x00,0x00,0x01,0x11,0xe1,0xac,0x36,0x00,0x02,0xa5,0xd5,0xc5,0x1b)
-#define COPY_ACC_GYRO_MAG_W2ST_CHAR_UUID(uuid_struct)  COPY_UUID_128(uuid_struct,0x00,0xE0,0x00,0x00,0x00,0x01,0x11,0xe1,0xac,0x36,0x00,0x02,0xa5,0xd5,0xc5,0x1b)
-#define COPY_FREQ_W2ST_CHAR_UUID(uuid_struct)		   COPY_UUID_128(uuid_struct,0x00,0xE0,0x00,0x00,0x00,0x01,0x11,0xe1,0xac,0x36,0x00,0x02,0xa5,0xd5,0xc5,0x1c)
+volatile uint8_t request_free_fall_notify = FALSE;
 
+AxesRaw_t x_axes = {0, 0, 0};
+AxesRaw_t g_axes = {0, 0, 0};
+AxesRaw_t m_axes = {0, 0, 0};
+AxesRaw_t q_axes[SEND_N_QUATERNIONS] = {{0, 0, 0}};
 
-/* Software Characteristics Service */
-#define COPY_SW_SENS_W2ST_SERVICE_UUID(uuid_struct)    COPY_UUID_128(uuid_struct,0x00,0x00,0x00,0x00,0x00,0x02,0x11,0xe1,0x9a,0xb4,0x00,0x02,0xa5,0xd5,0xc5,0x1b)
-#define COPY_QUATERNIONS_W2ST_CHAR_UUID(uuid_struct)   COPY_UUID_128(uuid_struct,0x00,0x00,0x01,0x00,0x00,0x01,0x11,0xe1,0xac,0x36,0x00,0x02,0xa5,0xd5,0xc5,0x1b)
+/* Private function prototypes -----------------------------------------------*/
+void GAP_DisconnectionComplete_CB(void);
+void GAP_ConnectionComplete_CB(uint8_t addr[6], uint16_t handle);
 
-uint16_t HWServW2STHandle, EnvironmentalCharHandle, AccGyroMagCharHandle, FreqHandle;
-uint16_t SWServW2STHandle, QuaternionsCharHandle;
-
-/* UUIDS */
-Service_UUID_t service_uuid;
-Char_UUID_t char_uuid;
-
-extern AxesRaw_t x_axes;
-extern AxesRaw_t g_axes;
-extern AxesRaw_t m_axes;
-
-extern uint16_t connection_handle;
-extern uint32_t start_time;
-
-/**
- * @brief  Add the 'HW' service (and the Environmental and AccGyr characteristics).
- * @param  None
- * @retval tBleStatus Status
- */
-
-void task_Update();
-void task_Update()
-{
-	Acc_Update(&x_axes);
-}
-
-
-
-tBleStatus Add_HWServW2ST_Service(void)
-{
-  tBleStatus ret;
-  uint8_t uuid[16];
-
-  /* Add_HWServW2ST_Service */
-  COPY_HW_SENS_W2ST_SERVICE_UUID(uuid);
-  BLUENRG_memcpy(&service_uuid.Service_UUID_128, uuid, 16);
-  ret = aci_gatt_add_serv(UUID_TYPE_128, service_uuid.Service_UUID_128, PRIMARY_SERVICE,
-                          1+3*5, &HWServW2STHandle);
-  if (ret != BLE_STATUS_SUCCESS)
-    return BLE_STATUS_ERROR;
-
-  /* Fill the Environmental BLE Characteristc */
-  COPY_ENVIRONMENTAL_W2ST_CHAR_UUID(uuid);
-  uuid[14] |= 0x04; /* One Temperature value*/
-  uuid[14] |= 0x10; /* Pressure value*/
-  BLUENRG_memcpy(&char_uuid.Char_UUID_128, uuid, 16);
-  ret =  aci_gatt_add_char(HWServW2STHandle, UUID_TYPE_128, char_uuid.Char_UUID_128,
-                           2+2+4,
-                           CHAR_PROP_NOTIFY|CHAR_PROP_READ| CHAR_PROP_WRITE,
-                           ATTR_PERMISSION_NONE,
-                           GATT_NOTIFY_READ_REQ_AND_WAIT_FOR_APPL_RESP,
-                           16, 0, &EnvironmentalCharHandle);
-  if (ret != BLE_STATUS_SUCCESS)
-    return BLE_STATUS_ERROR;
-
-  /* Fill the AccGyroMag BLE Characteristic */
-  COPY_ACC_GYRO_MAG_W2ST_CHAR_UUID(uuid);
-  BLUENRG_memcpy(&char_uuid.Char_UUID_128, uuid, 16);
-  ret =  aci_gatt_add_char(HWServW2STHandle, UUID_TYPE_128, char_uuid.Char_UUID_128,
-                           2+3*2,
-                           CHAR_PROP_NOTIFY|CHAR_PROP_READ,
-                           ATTR_PERMISSION_NONE,
-                           GATT_NOTIFY_READ_REQ_AND_WAIT_FOR_APPL_RESP,
-                           16, 0, &AccGyroMagCharHandle);
-  if (ret != BLE_STATUS_SUCCESS)
-    return BLE_STATUS_ERROR;
-
-  /* Fill the Frequency BLE Characteristic */
-    COPY_FREQ_W2ST_CHAR_UUID(uuid);
-    BLUENRG_memcpy(&char_uuid.Char_UUID_128, uuid, 16);
-    ret =  aci_gatt_add_char(HWServW2STHandle, UUID_TYPE_128, char_uuid.Char_UUID_128,
-                             1,
-                             CHAR_PROP_NOTIFY | CHAR_PROP_WRITE |CHAR_PROP_READ,
-                             ATTR_PERMISSION_NONE,
-							 GATT_NOTIFY_WRITE_REQ_AND_WAIT_FOR_APPL_RESP,
-                             16, 0, &FreqHandle);
-    if (ret != BLE_STATUS_SUCCESS)
-      return BLE_STATUS_ERROR;
-
-  return BLE_STATUS_SUCCESS;
-}
-
-/**
- * @brief  Add the SW Feature service using a vendor specific profile
- * @param  None
- * @retval tBleStatus Status
- */
-tBleStatus Add_SWServW2ST_Service(void)
-{
-  tBleStatus ret;
-  int32_t NumberOfRecords=1;
-  uint8_t uuid[16];
-
-  COPY_SW_SENS_W2ST_SERVICE_UUID(uuid);
-  BLUENRG_memcpy(&service_uuid.Service_UUID_128, uuid, 16);
-  ret = aci_gatt_add_serv(UUID_TYPE_128, service_uuid.Service_UUID_128, PRIMARY_SERVICE,
-                          1+3*NumberOfRecords, &SWServW2STHandle);
-
-  if (ret != BLE_STATUS_SUCCESS) {
-    goto fail;
-  }
-
-  COPY_QUATERNIONS_W2ST_CHAR_UUID(uuid);
-  BLUENRG_memcpy(&char_uuid.Char_UUID_128, uuid, 16);
-  ret =  aci_gatt_add_char(SWServW2STHandle, UUID_TYPE_128, char_uuid.Char_UUID_128,
-                           2+6*SEND_N_QUATERNIONS,
-                           CHAR_PROP_NOTIFY,
-                           ATTR_PERMISSION_NONE,
-                           GATT_NOTIFY_READ_REQ_AND_WAIT_FOR_APPL_RESP,
-                           16, 0, &QuaternionsCharHandle);
-
-  if (ret != BLE_STATUS_SUCCESS) {
-    goto fail;
-  }
-
-  return BLE_STATUS_SUCCESS;
-
-fail:
-  return BLE_STATUS_ERROR;
-}
-
-/**
- * @brief  Update acceleration characteristic value
- * @param  AxesRaw_t structure containing acceleration value in mg.
- * @retval tBleStatus Status
- */
-tBleStatus Acc_Update(AxesRaw_t *x_axes
-		//, AxesRaw_t *g_axes, AxesRaw_t *m_axes
-		)
-{
-  uint8_t buff[2+3*2];
-  tBleStatus ret;
-
-  HOST_TO_LE_16(buff,(HAL_GetTick()>>3));
-
-  HOST_TO_LE_16(buff+2,-x_axes->AXIS_Y);
-  HOST_TO_LE_16(buff+4, x_axes->AXIS_X);
-  HOST_TO_LE_16(buff+6,-x_axes->AXIS_Z);
-
-//  HOST_TO_LE_16(buff+8,g_axes->AXIS_Y);
-//  HOST_TO_LE_16(buff+10,g_axes->AXIS_X);
-//  HOST_TO_LE_16(buff+12,g_axes->AXIS_Z);
-//
-//  HOST_TO_LE_16(buff+14,m_axes->AXIS_Y);
-//  HOST_TO_LE_16(buff+16,m_axes->AXIS_X);
-//  HOST_TO_LE_16(buff+18,m_axes->AXIS_Z);
-
-  ret = aci_gatt_update_char_value(HWServW2STHandle, AccGyroMagCharHandle,
-				   0, 2+2*3, buff);
-  if (ret != BLE_STATUS_SUCCESS){
-    PRINTF("Error while updating Acceleration characteristic: 0x%02X\n",ret) ;
-    return BLE_STATUS_ERROR ;
-  }
-
-  return BLE_STATUS_SUCCESS;
-}
-
-/**
- * @brief  Update quaternions characteristic value
- * @param  SensorAxes_t *data Structure containing the quaterions
- * @retval tBleStatus      Status
- */
-tBleStatus Quat_Update(AxesRaw_t *data)
-{
-  tBleStatus ret;
-  uint8_t buff[2+6*SEND_N_QUATERNIONS];
-
-  HOST_TO_LE_16(buff,(HAL_GetTick()>>3));
-
-#if SEND_N_QUATERNIONS == 1
-  HOST_TO_LE_16(buff+2,data[0].AXIS_X);
-  HOST_TO_LE_16(buff+4,data[0].AXIS_Y);
-  HOST_TO_LE_16(buff+6,data[0].AXIS_Z);
-#elif SEND_N_QUATERNIONS == 2
-  HOST_TO_LE_16(buff+2,data[0].AXIS_X);
-  HOST_TO_LE_16(buff+4,data[0].AXIS_Y);
-  HOST_TO_LE_16(buff+6,data[0].AXIS_Z);
-
-  HOST_TO_LE_16(buff+8 ,data[1].AXIS_X);
-  HOST_TO_LE_16(buff+10,data[1].AXIS_Y);
-  HOST_TO_LE_16(buff+12,data[1].AXIS_Z);
-#elif SEND_N_QUATERNIONS == 3
-  HOST_TO_LE_16(buff+2,data[0].AXIS_X);
-  HOST_TO_LE_16(buff+4,data[0].AXIS_Y);
-  HOST_TO_LE_16(buff+6,data[0].AXIS_Z);
-
-  HOST_TO_LE_16(buff+8 ,data[1].AXIS_X);
-  HOST_TO_LE_16(buff+10,data[1].AXIS_Y);
-  HOST_TO_LE_16(buff+12,data[1].AXIS_Z);
-
-  HOST_TO_LE_16(buff+14,data[2].AXIS_X);
-  HOST_TO_LE_16(buff+16,data[2].AXIS_Y);
-  HOST_TO_LE_16(buff+18,data[2].AXIS_Z);
-#else
-#error SEND_N_QUATERNIONS could be only 1,2,3
-#endif
-
-  ret = aci_gatt_update_char_value(SWServW2STHandle, QuaternionsCharHandle,
-				   0, 2+6*SEND_N_QUATERNIONS, buff);
-  if (ret != BLE_STATUS_SUCCESS){
-    PRINTF("Error while updating Sensor Fusion characteristic: 0x%02X\n",ret) ;
-    return BLE_STATUS_ERROR ;
-  }
-
-  return BLE_STATUS_SUCCESS;
-}
+/* Private functions ---------------------------------------------------------*/
 
 /*******************************************************************************
-* Function Name  : Read_Request_CB.
-* Description    : Update the sensor values.
-* Input          : Handle of the characteristic to update.
-* Return         : None.
-*******************************************************************************/
-void Read_Request_CB(uint16_t handle)
+ * Function Name  : Set_DeviceConnectable.
+ * Description    : Puts the device in connectable mode.
+ * Input          : None.
+ * Output         : None.
+ * Return         : None.
+ *******************************************************************************/
+void Set_DeviceConnectable(void)
 {
-  tBleStatus ret;
-  //Acc_Update(&x_axes);
-  if(handle == AccGyroMagCharHandle + 1)
-  {
-    //Acc_Update(&x_axes, &g_axes, &m_axes);
-	  PRINTF("read ACC \n");
-  }
-  else if (handle == EnvironmentalCharHandle + 1)
-  {
-//    float data_t, data_p;
-//    data_t = 27.0 + ((uint64_t)rand()*5)/RAND_MAX; //T sensor emulation
-//    data_p = 1000.0 + ((uint64_t)rand()*100)/RAND_MAX; //P sensor emulation
-//    BlueMS_Environmental_Update((int32_t)(data_p *100), (int16_t)(data_t * 10));
-	  PRINTF("read ENV \n");
-  }else {
-	  PRINTF("read %x \n", handle - 1);
-  }
+  uint8_t ret;
+  const char local_name[] = {AD_TYPE_COMPLETE_LOCAL_NAME,SENSOR_DEMO_NAME};
 
-  if(connection_handle !=0)
+  uint8_t manuf_data[26] = {
+    2,0x0A,0x00, /* 0 dBm */  // Transmission Power
+    8,0x09,SENSOR_DEMO_NAME,  // Complete Name
+    13,0xFF,0x01, /* SKD version */
+    0x80,
+    0x00,
+    0xF4, /* ACC+Gyro+Mag 0xE0 | 0x04 Temp | 0x10 Pressure */
+    0x00, /*  */
+    0x00, /*  */
+    bdaddr[5], /* BLE MAC start -MSB first- */
+    bdaddr[4],
+    bdaddr[3],
+    bdaddr[2],
+    bdaddr[1],
+    bdaddr[0]  /* BLE MAC stop */
+  };
+
+  manuf_data[18] |= 0x01; /* Sensor Fusion */
+
+  hci_le_set_scan_resp_data(0, NULL);
+
+  PRINTF("Set General Discoverable Mode.\n");
+
+  ret = aci_gap_set_discoverable(ADV_DATA_TYPE,
+                                (ADV_INTERVAL_MIN_MS*1000)/625,(ADV_INTERVAL_MAX_MS*1000)/625,
+                                 STATIC_RANDOM_ADDR, NO_WHITE_LIST_USE,
+                                 sizeof(local_name), local_name, 0, NULL, 0, 0);
+
+  aci_gap_update_adv_data(26, manuf_data);
+
+  if(ret != BLE_STATUS_SUCCESS)
   {
-    ret = aci_gatt_allow_read(connection_handle);
-    if (ret != BLE_STATUS_SUCCESS)
+    PRINTF("aci_gap_set_discoverable() failed: 0x%02x\r\n", ret);
+  }
+  else
+    PRINTF("aci_gap_set_discoverable() --> SUCCESS\r\n");
+}
+
+/**
+ * @brief  Callback processing the ACI events.
+ * @note   Inside this function each event must be identified and correctly
+ *         parsed.
+ * @param  void* Pointer to the ACI packet
+ * @retval None
+ */
+void user_notify(void * pData)
+{
+  hci_uart_pckt *hci_pckt = pData;
+  /* obtain event packet */
+  hci_event_pckt *event_pckt = (hci_event_pckt*)hci_pckt->data;
+
+  if(hci_pckt->type != HCI_EVENT_PKT)
+    return;
+
+  switch(event_pckt->evt){
+
+  case EVT_DISCONN_COMPLETE:
     {
-      PRINTF("aci_gatt_allow_read() failed: 0x%02x\r\n", ret);
+      GAP_DisconnectionComplete_CB();
     }
+    break;
+
+  case EVT_LE_META_EVENT:
+    {
+      evt_le_meta_event *evt = (void *)event_pckt->data;
+
+      switch(evt->subevent){
+      case EVT_LE_CONN_COMPLETE:
+        {
+          evt_le_connection_complete *cc = (void *)evt->data;
+          GAP_ConnectionComplete_CB(cc->peer_bdaddr, cc->handle);
+        }
+        break;
+      }
+    }
+    break;
+
+  case EVT_VENDOR:
+    {
+      evt_blue_aci *blue_evt = (void*)event_pckt->data;
+
+      printf("ECODE is: %x \n", blue_evt -> ecode);
+      switch(blue_evt->ecode){
+
+		  case EVT_BLUE_GATT_READ_PERMIT_REQ:
+			{
+			printf("begin reading");
+			  evt_gatt_read_permit_req *pr = (void*)blue_evt->data;
+			  Read_Request_CB(pr->attr_handle);
+			}
+			break;
+		  case EVT_BLUE_GATT_ATTRIBUTE_MODIFIED:
+			{
+				printf("begin writing");
+				evt_gatt_attr_modified_IDB04A1 *pr = (void*)blue_evt->data;
+				printf("writing package: connection handle = %x, attribute handle = %x, data length = %d, data = %d",
+						pr -> conn_handle,
+						pr -> attr_handle,
+						pr -> data_length,
+						pr -> att_data);
+				Write_Request_CB(pr->attr_handle, pr -> att_data);
+			}
+			break;
+		  default:
+		  {
+			  uint16_t wrong_code = blue_evt->ecode;
+			  printf("not supposed to happen, wrong code : ");
+			  printf("%d \n",wrong_code);
+		  }
+      }
+
+    }
+    break;
   }
 }
 
-
-
-void Write_Request_CB(uint16_t handle, uint16_t value)
+/**
+ * @brief  This function is called when the peer device gets disconnected.
+ * @param  None
+ * @retval None
+ */
+void GAP_DisconnectionComplete_CB(void)
 {
-  tBleStatus ret;
-  uint8_t buff[1];
-  //HOST_TO_LE_16(buff,(HAL_GetTick()>>3));
-
-  buff[0] = value;
-  PRINTF("buff[0] = %x \n", buff[0]);
-  //PRINTF("buff[1] = %x \n", buff[1]);
-  //PRINTF("buff[2] = %x \n", buff[2]);
-
-  if(handle == AccGyroMagCharHandle + 1){
-	  printf("wrong: acc");
-  } else if(handle ==  EnvironmentalCharHandle+ 1){
-	  printf("wrong: env");
-  }else  if(handle == FreqHandle + 1){
-	  printf("correct");
-  }else{
-	  printf("%x  \n", handle);
-	  printf("%x  \n", EnvironmentalCharHandle+ 1);
-	  printf("%x  \n", AccGyroMagCharHandle + 1);
-	  printf("%x  \n", FreqHandle + 1);
-
-
-  }
-
-//  if(handle == AccGyroMagCharHandle + 1)
-//  {
-//    Acc_Update(&x_axes, &g_axes, &m_axes);
-//  }
-//  else if (handle == EnvironmentalCharHandle + 1)
-//  {
-//    float data_t, data_p;
-//    data_t = 27.0 + ((uint64_t)rand()*5)/RAND_MAX; //T sensor emulation
-//    data_p = 1000.0 + ((uint64_t)rand()*100)/RAND_MAX; //P sensor emulation
-//    BlueMS_Environmental_Update((int32_t)(data_p *100), (int16_t)(data_t * 10));
-//  }
-
-  if(connection_handle !=0)
-  {
-    ret = aci_gatt_update_char_value(HWServW2STHandle,
-    		FreqHandle,
-             0,
-             1,
-             buff);
-    if (ret != BLE_STATUS_SUCCESS)
-    {
-      PRINTF("aci_gatt_allow_read() failed: 0x%02x\r\n", ret);
-    }else{
-    	PRINTF("Write success");
-    }
-  }
+  connected = FALSE;
+  PRINTF("Disconnected\n");
+  /* Make the device connectable again. */
+  set_connectable = TRUE;
+  notification_enabled = FALSE;
 }
 
-
-tBleStatus BlueMS_Environmental_Update(int32_t press, int16_t temp)
+/**
+ * @brief  This function is called when there is a LE Connection Complete event.
+ * @param  uint8_t Address of peer device
+ * @param  uint16_t Connection handle
+ * @retval None
+ */
+void GAP_ConnectionComplete_CB(uint8_t addr[6], uint16_t handle)
 {
-  tBleStatus ret;
-  uint8_t buff[8];
-  //HOST_TO_LE_16(buff, HAL_GetTick()>>3);
+  connected = TRUE;
+  connection_handle = handle;
 
-  HOST_TO_LE_32(buff+2,press);
-  HOST_TO_LE_16(buff+6,temp);
-
-  ret = aci_gatt_update_char_value(HWServW2STHandle, EnvironmentalCharHandle,
-                                   0, 8, buff);
-
-  if (ret != BLE_STATUS_SUCCESS){
-    PRINTF("Error while updating TEMP characteristic: 0x%04X\n",ret) ;
-    return BLE_STATUS_ERROR ;
+  PRINTF("Connected to device:");
+  for(uint32_t i = 5; i > 0; i--){
+    PRINTF("%02X-", addr[i]);
   }
-
-  return BLE_STATUS_SUCCESS;
+  PRINTF("%02X\n", addr[0]);
 }
