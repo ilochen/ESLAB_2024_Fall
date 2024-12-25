@@ -9,7 +9,7 @@ With the rapid growth of edge computing and AI technologies, systems that combin
 
 ## Methods
 
-This project features a two-part system: a low-power STM32 microcontroller for preprocessing and a Raspberry Pi for machine learning and audio playback. For details please see 'Report/technical_report'.
+This project features a two-part system: a low-power STM32 microcontroller for preprocessing and a Raspberry Pi for machine learning and audio playback. For details please see `Report/technical_report`.
 
 ### Hardware
 
