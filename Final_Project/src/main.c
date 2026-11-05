@@ -22,12 +22,10 @@
 
 #define TERMINAL_USE
 
-/* Update SSID and PASSWORD with own Access point settings */
-#define SSID     "esys305"
-#define PASSWORD "305305abcd"
-
-uint8_t RemoteIP[] = {192, 168, 130, 242};
-#define RemotePORT	8002
+/* Copy echoplay_config.example.h to echoplay_config.h for local deployment. */
+#include "echoplay_config.h"
+uint8_t RemoteIP[] = ECHOPLAY_SERVER_IP;
+#define RemotePORT ECHOPLAY_SERVER_PORT
 
 #define WIFI_WRITE_TIMEOUT 10000
 #define WIFI_READ_TIMEOUT  10000

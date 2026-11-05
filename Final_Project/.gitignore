@@ -1,0 +1,3 @@
+src/echoplay_config.h
+__pycache__/
+*.pyc

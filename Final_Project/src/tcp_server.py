@@ -1,4 +1,7 @@
-import matplotlib.pyplot as plt
+from pathlib import Path
+import os
+
+from audio_protocol import receive_recording
 import numpy as np
 import socket
 from tensorflow.keras.models import load_model
@@ -6,7 +9,7 @@ import vlc
 import yt_dlp
 
 # Server setup
-server_address = ('192.168.50.95', 8002)
+server_address = (os.environ.get('ECHOPLAY_BIND', '127.0.0.1'), int(os.environ.get('ECHOPLAY_PORT', '8002')))
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind(server_address)
 server.listen(5)
@@ -27,7 +30,7 @@ def load_youtube_audio(youtube_url):
         'quiet': True,
         'no_warnings': True,
     }
-    
+
     # with yt_dlp.YoutubeDL(ydl_opts) as ydl:
     #     info = ydl.extract_info(youtube_url, download=False)
     #     audio_url = info['url']
@@ -37,7 +40,7 @@ def load_youtube_audio(youtube_url):
         audio_url = info['url']
         title = info.get('title', 'Unknown Title')
         print(f"Now playing: {title}")
-        
+
     return vlc.MediaPlayer(audio_url)
 
 
@@ -78,19 +81,16 @@ classical_player = load_youtube_audio(youtube_url_list[0][0])
 pop_player = load_youtube_audio(youtube_url_list[1][0])
 rock_player = load_youtube_audio(youtube_url_list[2][0])
 hits_player = load_youtube_audio(youtube_url_list[3][0])
-player_list = [classical_player ,pop_player, rock_player, hits_player]
+player_list = [classical_player, pop_player, rock_player, hits_player]
 
 current_genre = 0
 
-# Audio data buffers
-audio_wave = np.zeros([1, 8192])
-audio_fft = np.zeros([1, 8192])
 rec_num = 0
 
-
 # Load the model
-COMMAND_MODEL_PATH = './command_spotter-2.keras'
-GENRE_MODEL_PATH ='./genre_spotter-11.keras'
+model_dir = Path(__file__).resolve().parents[1] / 'Models'
+COMMAND_MODEL_PATH = model_dir / 'command_spotter-2.keras'
+GENRE_MODEL_PATH = model_dir / 'genre_spotter-11.keras'
 command_model = load_model(COMMAND_MODEL_PATH)
 genre_model = load_model(GENRE_MODEL_PATH)
 
@@ -108,119 +108,94 @@ client.send(message.encode('utf-8'))
 
 
 while True:
-    j += 1
-    #print(f"Processing packet {j}")
-    
-    # Receive data
-    request = client.recv(1024)
-    
-    # Decode float array
-    float_array = np.frombuffer(request, dtype=np.float32)
-    #print(f"Packet {j}: Float array size = {len(float_array)}")
-    
-    if len(float_array) == 256:
-        audio_fft[0] = np.append(audio_fft[0], float_array)[256:8192+256]
-    else:
-        missed_numbers_f += 1
-        if missed_numbers_f % 2 == 1:
-            j -= 1
+    recording = receive_recording(client)
+    if recording is None:
+        break
+    fft_waveform = np.frombuffer(recording, dtype='<f4').reshape(64, 128).mean(axis=0) / 128
+    fft_input = np.expand_dims(np.pad(fft_waveform, (0, 1)), axis=0)
 
-    if j == 32:
+    # Predict using the model
+    fft_input = np.expand_dims(fft_waveform, axis=0)
 
-        # Process FFT data
-        fft_data = audio_fft[0][:8192]
-        segment_size = 128
-        if fft_data.ndim == 1:
-            fft_data = fft_data.reshape(-1, segment_size)
 
-        fft_waveform = np.mean(fft_data, axis=0) / 128
-        fft_waveform = np.pad(fft_waveform, (0, 1), 'constant')
+    if state == 'Command' :
 
-        # Predict using the model
-        fft_input = np.expand_dims(fft_waveform, axis=0)
-        
-        
-        if state == 'Command' :
-            
-            # predict commands
-            predictions = command_model.predict(fft_input)
-            predicted_class = np.argmax(predictions, axis=1)[0]
-            
-            # Labels mapping
-            labels = {
-                0: 'Next',
-                1: 'Start',
-                2: 'Pause', #PAAAAAAAuuuuse
-                3: 'Choose',
-                4: 'Back'  #bAAAck
-            }
-            action = labels.get(predicted_class, 'Unknown')
-            print(f"Predicted class: {action}")
+        # predict commands
+        predictions = command_model.predict(fft_input)
+        predicted_class = np.argmax(predictions, axis=1)[0]
 
-            # Take action based on prediction
-            if action == 'Back':
-                if(player_list[current_genre].is_playing()):
-                    player_list[current_genre].pause()
-                current_url = max(current_url - 1, 0)
-                player_list[current_genre] = load_youtube_audio(youtube_url_list[current_genre][current_url])
+        # Labels mapping
+        labels = {
+            0: 'Next',
+            1: 'Start',
+            2: 'Pause', #PAAAAAAAuuuuse
+            3: 'Choose',
+            4: 'Back'  #bAAAck
+        }
+        action = labels.get(predicted_class, 'Unknown')
+        print(f"Predicted class: {action}")
+
+        # Take action based on prediction
+        if action == 'Back':
+            if(player_list[current_genre].is_playing()):
+                player_list[current_genre].pause()
+            current_url = max(current_url - 1, 0)
+            player_list[current_genre] = load_youtube_audio(youtube_url_list[current_genre][current_url])
+            player_list[current_genre].play()
+        elif action == 'Next':
+            if(player_list[current_genre].is_playing()):
+                player_list[current_genre].pause()
+            current_url = min(current_url + 1, len(youtube_url_list[current_genre]) - 1)
+            player_list[current_genre] = load_youtube_audio(youtube_url_list[current_genre][current_url])
+            player_list[current_genre].play()
+        elif action == 'Start':
+            if(player_list[current_genre].is_playing() == 0):
                 player_list[current_genre].play()
-            elif action == 'Next':
-                if(player_list[current_genre].is_playing()):
-                    player_list[current_genre].pause()
-                current_url = min(current_url + 1, len(youtube_url_list[current_genre]) - 1)
-                player_list[current_genre] = load_youtube_audio(youtube_url_list[current_genre][current_url])
-                player_list[current_genre].play()
-            elif action == 'Start':
-                if(player_list[current_genre].is_playing() == 0):
-                    player_list[current_genre].play()
-            elif action == 'Pause':
-                if(player_list[current_genre].is_playing()):
-                    player_list[current_genre].pause()
-            elif action == 'Choose':
-                if(player_list[current_genre].is_playing()):
-                    player_list[current_genre].pause()
-                #Store current url
-                genre_url_list[current_genre] = current_url
-                state = 'Genre'
-                
-        elif state == 'Genre' :
-            
-            #predict Genre
-            predictions = genre_model.predict(fft_input)
-            predicted_class = np.argmax(predictions, axis=1)[0]
-            
-            # Labels mapping
-            labels = {
-                0: 'Classic',
-                1: 'Hits',
-                2: 'Rock', #longer ㄖㄨㄚˋ ㄎㄜ-
-                3: 'Pop',
-            }
-            genre = labels.get(predicted_class, 'Unknown')
-            print(f"Predicted class: {genre}")
+        elif action == 'Pause':
+            if(player_list[current_genre].is_playing()):
+                player_list[current_genre].pause()
+        elif action == 'Choose':
+            if(player_list[current_genre].is_playing()):
+                player_list[current_genre].pause()
+            #Store current url
+            genre_url_list[current_genre] = current_url
+            state = 'Genre'
 
-            # Select Genre
-            if genre == 'Classic':
-                current_genre = 0
-            elif genre == 'Hits':
-                current_genre = 1
-            elif genre == 'Rock':
-                current_genre = 2
-            elif genre == 'Pop':
-                current_genre = 3
-            
-            #update url
-            current_url = genre_url_list[current_genre]
-            
-            #switch states
-            state = 'Command'
-            
+    elif state == 'Genre' :
 
-        # Reset for next round
-        rec_num += 1
-        j = 0
-        missed_numbers_f = 0
-        audio_fft = np.zeros([1, 8192])
+        #predict Genre
+        predictions = genre_model.predict(fft_input)
+        predicted_class = np.argmax(predictions, axis=1)[0]
+
+        # Labels mapping
+        labels = {
+            0: 'Classic',
+            1: 'Hits',
+            2: 'Rock', #longer ㄖㄨㄚˋ ㄎㄜ-
+            3: 'Pop',
+        }
+        genre = labels.get(predicted_class, 'Unknown')
+        print(f"Predicted class: {genre}")
+
+        # Select Genre
+        if genre == 'Classic':
+            current_genre = 0
+        elif genre == 'Hits':
+            current_genre = 3
+        elif genre == 'Rock':
+            current_genre = 2
+        elif genre == 'Pop':
+            current_genre = 1
+
+        #update url
+        current_url = genre_url_list[current_genre]
+
+        #switch states
+        state = 'Command'
+
+
+    # Reset for next round
+    rec_num += 1
 
     if rec_num == 20:
         break
