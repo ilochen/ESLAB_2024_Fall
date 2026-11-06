@@ -1,0 +1,20 @@
+name: EchoPlay receiver and models
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  receiver:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: Final_Project/requirements.txt
+      - run: python -m pip install -r Final_Project/requirements.txt
+      - run: python -m unittest discover -s Final_Project/src -p 'test_*.py' -v
+      - name: Load and execute both saved classifiers
+        env:
+          TF_CPP_MIN_LOG_LEVEL: '2'
+        run: python Final_Project/src/check_models.py

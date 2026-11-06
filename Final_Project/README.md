@@ -18,7 +18,16 @@ Copy `src/echoplay_config.example.h` to `src/echoplay_config.h` and enter the lo
 
 ## Pi setup
 
-Use a Python environment with TensorFlow/Keras capable of loading the two saved .keras models, NumPy, python-vlc and yt-dlp. Install the native VLC runtime and pair the Pi to the speaker. The playback backend requires connectivity to the playlist streams. From the Final_Project directory:
+Use Python 3.11. Install the native VLC runtime and pair the Pi to the speaker. Install the receiver dependencies in a virtual environment:
+```sh
+cd Final_Project
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python src/check_models.py
+```
+
+The dependency file pins the TensorFlow/Keras/NumPy model-loading environment. `yt-dlp` follows its current release because upstream playback extraction changes independently of the classifiers. The playback backend requires connectivity to the playlist streams. From the Final_Project directory:
 
 ```sh
 export ECHOPLAY_BIND=192.168.1.100  # substitute the Pi's LAN address
@@ -32,4 +41,4 @@ The server defaults to loopback for local development. Set ECHOPLAY_PORT to over
 - [Models](Models/) contains the command and genre training notebooks and the corresponding saved weights.
 - [Dataset](Dataset/) contains the speech generation notebook and example audio files.
 - [Report](Report/) contains the technical report and presentation slides.
-- Run `python3 -m unittest discover -s src -p 'test_*.py'` to check the recording boundary and truncated-stream handling without the board or machine learning dependencies. The physical demo documents the end-to-end hardware run.
+- Run `python3 -m unittest discover -s src -p 'test_*.py'` to check the recording boundary and truncated-stream handling without the board (NumPy is required). Run `python3 src/check_models.py` to load both saved models and verify a finite probability vector from the 129-feature receiver output. GitHub Actions runs both checks. The physical demo documents the end-to-end hardware run.

@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 
 from audio_protocol import receive_recording
+from audio_features import recording_features
 import numpy as np
 import socket
 from tensorflow.keras.models import load_model
@@ -111,12 +112,7 @@ while True:
     recording = receive_recording(client)
     if recording is None:
         break
-    fft_waveform = np.frombuffer(recording, dtype='<f4').reshape(64, 128).mean(axis=0) / 128
-    fft_input = np.expand_dims(np.pad(fft_waveform, (0, 1)), axis=0)
-
-    # Predict using the model
-    fft_input = np.expand_dims(fft_waveform, axis=0)
-
+    fft_input = recording_features(recording)
 
     if state == 'Command' :
 
